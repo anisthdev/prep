@@ -13,7 +13,7 @@ license=('MIT')
 depends=('python')
 optdepends=('totoro-quickbar: the bar pill, dashboard and menu')
 source=("$_name-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('0253a44d7b9fca343338975d4306290aa6843e4f6494d0310b59c5199099a4e3')
 
 check() {
     cd "$_name-$pkgver"
