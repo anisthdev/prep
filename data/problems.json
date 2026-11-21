@@ -7,7 +7,7 @@
       ["two-sum", "Two Sum", "easy"],
       ["group-anagrams", "Group Anagrams", "medium"],
       ["top-k-frequent-elements", "Top K Frequent Elements", "medium"],
-      ["encode-and-decode-strings", "Encode and Decode Strings", "medium"],
+      ["encode-and-decode-strings", "Encode and Decode Strings", "medium", "https://neetcode.io/problems/string-encode-and-decode/question"],
       ["product-of-array-except-self", "Product of Array Except Self", "medium"],
       ["valid-sudoku", "Valid Sudoku", "medium"],
       ["longest-consecutive-sequence", "Longest Consecutive Sequence", "medium"]
@@ -104,14 +104,14 @@
       ["number-of-islands", "Number of Islands", "medium"],
       ["max-area-of-island", "Max Area of Island", "medium"],
       ["clone-graph", "Clone Graph", "medium"],
-      ["walls-and-gates", "Walls and Gates", "medium"],
+      ["walls-and-gates", "Walls and Gates", "medium", "https://neetcode.io/problems/islands-and-treasure/question"],
       ["rotting-oranges", "Rotting Oranges", "medium"],
       ["pacific-atlantic-water-flow", "Pacific Atlantic Water Flow", "medium"],
       ["surrounded-regions", "Surrounded Regions", "medium"],
       ["course-schedule", "Course Schedule", "medium"],
       ["course-schedule-ii", "Course Schedule II", "medium"],
-      ["graph-valid-tree", "Graph Valid Tree", "medium"],
-      ["number-of-connected-components-in-an-undirected-graph", "Number of Connected Components in an Undirected Graph", "medium"],
+      ["graph-valid-tree", "Graph Valid Tree", "medium", "https://neetcode.io/problems/valid-tree/question"],
+      ["number-of-connected-components-in-an-undirected-graph", "Number of Connected Components in an Undirected Graph", "medium", "https://neetcode.io/problems/count-connected-components/question"],
       ["redundant-connection", "Redundant Connection", "medium"],
       ["word-ladder", "Word Ladder", "hard"]
     ]},
@@ -120,7 +120,7 @@
       ["min-cost-to-connect-all-points", "Min Cost to Connect All Points", "medium"],
       ["network-delay-time", "Network Delay Time", "medium"],
       ["swim-in-rising-water", "Swim in Rising Water", "hard"],
-      ["alien-dictionary", "Alien Dictionary", "hard"],
+      ["alien-dictionary", "Alien Dictionary", "hard", "https://neetcode.io/problems/foreign-dictionary/question"],
       ["cheapest-flights-within-k-stops", "Cheapest Flights Within K Stops", "medium"]
     ]},
     {"id": "dp-1d", "name": "1-D Dynamic Programming", "problems": [
@@ -164,8 +164,8 @@
       ["insert-interval", "Insert Interval", "medium"],
       ["merge-intervals", "Merge Intervals", "medium"],
       ["non-overlapping-intervals", "Non-overlapping Intervals", "medium"],
-      ["meeting-rooms", "Meeting Rooms", "easy"],
-      ["meeting-rooms-ii", "Meeting Rooms II", "medium"],
+      ["meeting-rooms", "Meeting Rooms", "easy", "https://neetcode.io/problems/meeting-schedule/question"],
+      ["meeting-rooms-ii", "Meeting Rooms II", "medium", "https://neetcode.io/problems/meeting-schedule-ii/question"],
       ["minimum-interval-to-include-each-query", "Minimum Interval to Include Each Query", "hard"]
     ]},
     {"id": "math-geometry", "name": "Math & Geometry", "problems": [

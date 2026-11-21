@@ -134,16 +134,34 @@ def catalogue():
     problems, patterns = {}, []
     for p in data["patterns"]:
         patterns.append({"id": p["id"], "name": p["name"], "total": len(p["problems"])})
-        for slug, title, diff in p["problems"]:
+        for slug, title, diff, *rest in p["problems"]:
             problems[slug] = {
                 "slug": slug,
                 "title": title,
                 "diff": diff,
+                # A fourth field overrides where the problem is (a URL)
+                "url": rest[0] if rest else leetcode(slug),
                 "pattern": p["id"],
                 "patternName": p["name"],
                 "list": data.get("list", ""),
             }
     return problems, patterns
+
+
+def leetcode(slug):
+    return f"https://leetcode.com/problems/{slug}/"
+
+
+def url_of(slug, problems):
+    return problems.get(slug, {}).get("url") or leetcode(slug)
+
+
+def open_url(url):
+    """In the default browser, without waiting for it."""
+    try:
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        print(f"prep: couldn't open {url}", file=sys.stderr)
 
 
 def slugify(text):
@@ -497,7 +515,10 @@ def cmd_timer(args):
     if args.action == "start":
         problems, _ = catalogue()
         slug = resolve(args.problem, problems) if args.problem else ""
-        set_timer({"started": now().isoformat(), "problem": slug, "title": problems.get(slug, {}).get("title", titled(slug)) if slug else ""})
+        url = url_of(slug, problems) if slug else ""
+        set_timer({"started": now().isoformat(), "problem": slug, "title": problems.get(slug, {}).get("title", titled(slug)) if slug else "", "url": url})
+        if args.open and url:
+            open_url(url)
         print(f"Timer started{' for ' + slug if slug else ''}")
     elif args.action in ("stop", "cancel"):
         if not t:
@@ -631,6 +652,7 @@ def cmd_problems(args):
                     "pattern": a.get("pattern", ""),
                     "patternName": names.get(a.get("pattern"), a.get("pattern", "")),
                     "list": "",
+                    "url": leetcode(slug),
                     "last": a["result"],
                     "lastDate": a["date"],
                     "attempts": counts[slug],
@@ -722,6 +744,7 @@ def main():
     p = sub.add_parser("timer", help="time an attempt")
     p.add_argument("action", choices=["start", "stop", "cancel", "status"], nargs="?", default="status")
     p.add_argument("problem", nargs="?")
+    p.add_argument("-o", "--open", action="store_true", help="open the problem in the browser")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_timer)
 

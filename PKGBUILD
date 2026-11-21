@@ -1,7 +1,7 @@
 # Maintainer: asifb
 _name=prep
 pkgname=totoro-prep
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Interview preparation tracker: DSA attempts, re-solves, timer, mocks, applications (Python)"
 arch=('any')
@@ -13,7 +13,7 @@ license=('MIT')
 depends=('python')
 optdepends=('totoro-quickbar: the bar pill, dashboard and menu')
 source=("$_name-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('9aa27856100d63f1109b658bc139d97da9727c5b14bab4de8e4364357429dae2')
+sha256sums=('SKIP')
 
 check() {
     cd "$_name-$pkgver"

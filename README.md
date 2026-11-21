@@ -16,7 +16,7 @@ prep                              # where you stand (same as prep status)
 prep log two-sum s                # solved clean
 prep log "Group Anagrams" h       # solved with hints: re-solve in 3 days
 prep log https://leetcode.com/problems/majority-element/ f -p arrays -d e -m 25
-prep timer start top-k-frequent-elements
+prep timer start top-k-frequent-elements --open   # and opens it on LeetCode
 prep log top-k-frequent-elements s   # takes the minutes from the timer
 prep undo                         # remove the last attempt
 
@@ -36,7 +36,9 @@ prep problems -p two-pointers     # the list, ✓ clean, ~ hints, ✗ failed
 Results are `solved`, `hint` or `fail` (`s`, `h`, `f`). A problem is a
 slug, its title or its LeetCode URL. Problems on the bundled list (NeetCode
 150) know their pattern and difficulty; others take `-p` and `-d` the first
-time and remember them.
+time and remember them. A problem's page is
+`leetcode.com/problems/SLUG/`; a fourth field in `problems.json` gives
+another URL.
 
 ## The plan
 
