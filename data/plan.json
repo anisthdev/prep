@@ -1,0 +1,52 @@
+{
+  "goal": "An offer from the companies you want",
+  "deadline": "2027-09-30",
+  "retryDays": 3,
+  "timerMinutes": 35,
+  "weekStartsOn": "sunday",
+  "phases": [
+    {
+      "id": "warmup",
+      "name": "Warm up",
+      "start": "2026-12-01",
+      "end": "2026-12-31",
+      "focus": "A routine first; easies by pattern",
+      "exit": "Studied on most days of the last two weeks",
+      "metric": {"kind": "studied-days", "window": 14, "target": 10}
+    },
+    {
+      "id": "foundations",
+      "name": "DSA foundations",
+      "start": "2027-01-01",
+      "end": "2027-03-31",
+      "focus": "NeetCode 150 by pattern, re-solving failures after 3 days",
+      "exit": "About 70% of fresh mediums solved in 35 minutes without hints",
+      "metric": {"kind": "fresh-mediums", "window": 30, "minutes": 35, "target": 0.7, "minimum": 10}
+    },
+    {
+      "id": "depth",
+      "name": "Depth and design",
+      "start": "2027-04-01",
+      "end": "2027-05-31",
+      "focus": "Harder and company-tagged problems, contests, system design, practice interviews",
+      "exit": "Two mock interviews passed and one real interview loop done",
+      "metric": {"kind": "mocks-and-loops", "mocks": 2, "loops": 1}
+    },
+    {
+      "id": "target",
+      "name": "Target applications",
+      "start": "2027-06-01",
+      "end": "2027-09-30",
+      "focus": "Referrals, regular mocks, behavioural stories",
+      "exit": "A signed offer",
+      "metric": {"kind": "offer"}
+    }
+  ],
+  "weeks": [
+    {"start": "2026-12-06", "label": "Week 1", "focus": "30–45 minutes a day", "patterns": ["arrays-hashing"]},
+    {"start": "2026-12-13", "label": "Week 2", "focus": "Easies, plus a well-known medium or two", "patterns": ["two-pointers", "sliding-window"]},
+    {"start": "2026-12-20", "label": "Week 3", "focus": "Easies", "patterns": ["stack", "binary-search"]},
+    {"start": "2026-12-27", "label": "Week 4", "focus": "Re-solve every failed problem without hints; plan January"}
+  ],
+  "stages": ["wishlist", "referral", "applied", "oa", "screen", "loop", "offer", "signed", "rejected", "withdrawn"]
+}

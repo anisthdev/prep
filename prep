@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+"""prep: a tracker for interview preparation.
+
+Logs DSA attempts (problem, pattern, result, minutes), schedules re-solves,
+times attempts, logs study sessions, mock interviews and contests, keeps an
+application pipeline and behavioural stories, and reports progress against a
+phased plan with an exit test per phase.
+
+Data lives in $XDG_DATA_HOME/prep as plain files that read and edit by hand:
+attempts.jsonl and events.jsonl (one JSON object a line, appended),
+applications.json and stories.md. Every change rewrites `.changed` in place,
+so a frontend can watch that one file. `prep status --json` is the interface
+for frontends; see README.md.
+"""
+
+import argparse
+import datetime as dt
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+RESULTS = {"s": "solved", "solved": "solved", "h": "hint", "hint": "hint", "f": "fail", "fail": "fail"}
+DIFFS = {"e": "easy", "easy": "easy", "m": "medium", "medium": "medium", "h": "hard", "hard": "hard"}
+
+
+# --- Paths ----------------------------------------------------------------
+
+
+def xdg(var, default):
+    return Path(os.environ.get(var) or Path.home() / default)
+
+
+DATA = xdg("XDG_DATA_HOME", ".local/share") / "prep"
+STATE = xdg("XDG_STATE_HOME", ".local/state") / "prep"
+CONFIG = xdg("XDG_CONFIG_HOME", ".config") / "prep"
+
+ATTEMPTS = DATA / "attempts.jsonl"
+EVENTS = DATA / "events.jsonl"
+APPS = DATA / "applications.json"
+STORIES = DATA / "stories.md"
+STAMP = DATA / ".changed"
+TIMER = STATE / "timer.json"
+
+
+def shared(name):
+    """A bundled file: the user's own copy in ~/.config/prep first, then the
+    installed one (/usr/share/prep), then the checkout's data/."""
+    here = Path(os.path.realpath(__file__)).parent
+    for d in (CONFIG, here.parent / "share" / "prep", here / "data"):
+        if (d / name).is_file():
+            return d / name
+    sys.exit(f"prep: {name} not found")
+
+
+def load_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def read_lines(path):
+    out = []
+    try:
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        pass
+    except OSError:
+        pass
+    return out
+
+
+def touch():
+    """Mark a change for watchers: rewritten in place, never replaced."""
+    DATA.mkdir(parents=True, exist_ok=True)
+    with STAMP.open("w") as f:
+        f.write(dt.datetime.now().isoformat(timespec="seconds") + "\n")
+
+
+def append(path, record):
+    DATA.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    touch()
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    touch()
+
+
+# --- Time -----------------------------------------------------------------
+
+
+def now():
+    return dt.datetime.now().replace(microsecond=0)
+
+
+def today():
+    override = os.environ.get("PREP_TODAY")
+    return dt.date.fromisoformat(override) if override else dt.date.today()
+
+
+def day(s):
+    return dt.date.fromisoformat(s)
+
+
+def week_start(d):
+    # Weeks run Sunday to Saturday, as the plan's do
+    return d - dt.timedelta(days=(d.weekday() + 1) % 7)
+
+
+# --- Problems ---------------------------------------------------------------
+
+
+def catalogue():
+    """{slug: {slug, title, diff, pattern, patternName, list}} and the
+    patterns in order [{id, name, total}]."""
+    data = load_json(shared("problems.json"), {"patterns": []})
+    problems, patterns = {}, []
+    for p in data["patterns"]:
+        patterns.append({"id": p["id"], "name": p["name"], "total": len(p["problems"])})
+        for slug, title, diff in p["problems"]:
+            problems[slug] = {
+                "slug": slug,
+                "title": title,
+                "diff": diff,
+                "pattern": p["id"],
+                "patternName": p["name"],
+                "list": data.get("list", ""),
+            }
+    return problems, patterns
+
+
+def slugify(text):
+    text = text.strip().lower()
+    # A LeetCode URL: its slug
+    if "/problems/" in text:
+        text = text.split("/problems/")[1].split("/")[0]
+    out = "".join(c if c.isalnum() else "-" for c in text)
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out.strip("-")
+
+
+def titled(slug):
+    return " ".join(w.capitalize() for w in slug.split("-"))
+
+
+# --- Timer ------------------------------------------------------------------
+
+
+def timer():
+    t = load_json(TIMER, None)
+    return t if t and t.get("started") else None
+
+
+def timer_minutes(t):
+    started = dt.datetime.fromisoformat(t["started"])
+    return max(1, round((now() - started).total_seconds() / 60))
+
+
+def set_timer(t):
+    if t is None:
+        TIMER.unlink(missing_ok=True)
+        touch()
+    else:
+        write_json(TIMER, t)
+
+
+# --- Status -----------------------------------------------------------------
+
+
+def plan():
+    return load_json(shared("plan.json"), {})
+
+
+def latest_by_problem(attempts):
+    out = {}
+    for a in attempts:
+        out[a["problem"]] = a
+    return out
+
+
+def due_list(attempts, problems, on):
+    out = []
+    counts = {}
+    for a in attempts:
+        counts[a["problem"]] = counts.get(a["problem"], 0) + 1
+    for slug, a in latest_by_problem(attempts).items():
+        retry = a.get("retry")
+        if not retry:
+            continue
+        p = problems.get(slug, {})
+        out.append(
+            {
+                "problem": slug,
+                "title": a.get("title") or p.get("title") or titled(slug),
+                "pattern": a.get("pattern") or p.get("pattern", ""),
+                "diff": a.get("diff") or p.get("diff", ""),
+                "retry": retry,
+                "last": a["result"],
+                "lastDate": a["date"],
+                "attempts": counts[slug],
+                "due": day(retry) <= on,
+                "overdueDays": max(0, (on - day(retry)).days),
+            }
+        )
+    out.sort(key=lambda d: (d["retry"], d["problem"]))
+    return out
+
+
+def studied_days(attempts, events):
+    days = {}
+    for a in attempts:
+        days[a["date"]] = days.get(a["date"], 0) + (a.get("mins") or 0)
+    for e in events:
+        days[e["date"]] = days.get(e["date"], 0) + (e.get("mins") or 0)
+    return days
+
+
+def phase_metric(ph, attempts, events, apps, on, days):
+    m = ph.get("metric", {})
+    kind = m.get("kind")
+    if kind == "studied-days":
+        window = m.get("window", 14)
+        n = sum(1 for i in range(window) if (on - dt.timedelta(days=i)).isoformat() in days)
+        return {
+            "kind": kind,
+            "label": f"Studied {n} of the last {window} days",
+            "value": n,
+            "target": m.get("target", window),
+            "progress": min(1, n / max(1, m.get("target", window))),
+            "met": n >= m.get("target", window),
+        }
+    if kind == "fresh-mediums":
+        window, limit = m.get("window", 30), m.get("minutes", 35)
+        since = on - dt.timedelta(days=window - 1)
+        seen, fresh = set(), []
+        for a in attempts:
+            if a["problem"] in seen:
+                continue
+            seen.add(a["problem"])
+            if a.get("diff") == "medium" and day(a["date"]) >= since:
+                fresh.append(a)
+        timed = [a for a in fresh if a.get("mins") is not None]
+        passed = [a for a in timed if a["result"] == "solved" and a["mins"] <= limit]
+        rate = len(passed) / len(timed) if timed else 0
+        enough = len(timed) >= m.get("minimum", 10)
+        return {
+            "kind": kind,
+            "label": f"{len(passed)} of {len(timed)} fresh mediums in {limit} min without hints"
+            + ("" if enough else f" (need {m.get('minimum', 10)} to judge)"),
+            "value": rate,
+            "target": m.get("target", 0.7),
+            "progress": min(1, rate / m.get("target", 0.7)),
+            "met": enough and rate >= m.get("target", 0.7),
+            "untimed": len(fresh) - len(timed),
+        }
+    if kind == "mocks-and-loops":
+        passed = sum(1 for e in events if e["type"] == "mock" and e.get("result") == "pass")
+        loops = sum(1 for a in apps if "loop" in a.get("history", []) or a.get("stage") == "loop")
+        need_m, need_l = m.get("mocks", 2), m.get("loops", 1)
+        done = min(passed, need_m) + min(loops, need_l)
+        return {
+            "kind": kind,
+            "label": f"{passed}/{need_m} mocks passed · {loops}/{need_l} real loops",
+            "value": done,
+            "target": need_m + need_l,
+            "progress": done / (need_m + need_l),
+            "met": passed >= need_m and loops >= need_l,
+        }
+    if kind == "offer":
+        signed = [a["company"] for a in apps if a.get("stage") == "signed"]
+        offers = [a["company"] for a in apps if a.get("stage") == "offer"]
+        label = f"Signed: {', '.join(signed)}" if signed else (f"Offers: {', '.join(offers)}" if offers else "No offer yet")
+        return {
+            "kind": kind,
+            "label": label,
+            "value": len(signed),
+            "target": 1,
+            "progress": 1 if signed else 0.5 if offers else 0,
+            "met": bool(signed),
+        }
+    return {"kind": kind, "label": "", "value": 0, "target": 0, "progress": 0, "met": False}
+
+
+def status():
+    on = today()
+    pl = plan()
+    problems, patterns = catalogue()
+    attempts = read_lines(ATTEMPTS)
+    events = read_lines(EVENTS)
+    apps = load_json(APPS, [])
+    days = studied_days(attempts, events)
+
+    # The phase today is in (before the first: the first; after: the last)
+    phases = pl.get("phases", [])
+    current = next((p for p in phases if day(p["start"]) <= on <= day(p["end"])), None)
+    if current is None and phases:
+        current = phases[0] if on < day(phases[0]["start"]) else phases[-1]
+    phase = None
+    if current:
+        start, end = day(current["start"]), day(current["end"])
+        length = (end - start).days + 1
+        phase = dict(current)
+        phase.update(
+            {
+                "index": phases.index(current),
+                "count": len(phases),
+                "daysLeft": max(0, (end - on).days),
+                "progress": min(1, max(0, ((on - start).days + 1) / length)),
+                "metric": phase_metric(current, attempts, events, apps, on, days),
+            }
+        )
+
+    week = None
+    for w in pl.get("weeks", []):
+        ws = day(w["start"])
+        if ws <= on < ws + dt.timedelta(days=7):
+            week = dict(w)
+            names = {p["id"]: p["name"] for p in patterns}
+            week["patternNames"] = [names.get(p, p) for p in w.get("patterns", [])]
+
+    # This week (Sunday to Saturday)
+    ws = week_start(on)
+    in_week = [a for a in attempts if day(a["date"]) >= ws]
+    ev_week = [e for e in events if day(e["date"]) >= ws]
+    this_week = {
+        "start": ws.isoformat(),
+        "problems": len(in_week),
+        "solved": sum(1 for a in in_week if a["result"] == "solved"),
+        "hint": sum(1 for a in in_week if a["result"] == "hint"),
+        "failed": sum(1 for a in in_week if a["result"] == "fail"),
+        "minutes": sum(a.get("mins") or 0 for a in in_week) + sum(e.get("mins") or 0 for e in ev_week),
+        "mocks": sum(1 for e in ev_week if e["type"] == "mock"),
+        "contests": sum(1 for e in ev_week if e["type"] == "contest"),
+        "days": len({a["date"] for a in in_week} | {e["date"] for e in ev_week}),
+    }
+
+    # The last 14 days, oldest first, minutes each (0 = studied, untimed)
+    strip = []
+    for i in range(13, -1, -1):
+        d = (on - dt.timedelta(days=i)).isoformat()
+        strip.append({"date": d, "studied": d in days, "minutes": days.get(d, 0)})
+
+    # Per pattern: the list's problems solved clean at least once
+    latest = latest_by_problem(attempts)
+    clean = {a["problem"] for a in attempts if a["result"] == "solved"}
+    pattern_rows = []
+    for p in patterns:
+        slugs = [s for s, q in problems.items() if q["pattern"] == p["id"]]
+        tried = [s for s in slugs if s in latest]
+        pattern_rows.append(
+            {
+                "id": p["id"],
+                "name": p["name"],
+                "total": p["total"],
+                "tried": len(tried),
+                "solved": sum(1 for s in slugs if s in clean),
+                "open": sum(1 for s in tried if latest[s].get("retry")),
+                "extra": len({a["problem"] for a in attempts if a.get("pattern") == p["id"] and a["problem"] not in problems}),
+            }
+        )
+
+    due = due_list(attempts, problems, on)
+    t = timer()
+    recent = []
+    for a in attempts[-12:][::-1]:
+        recent.append({k: a.get(k) for k in ("date", "problem", "title", "pattern", "diff", "result", "mins", "retry")})
+
+    return {
+        "today": on.isoformat(),
+        "goal": pl.get("goal", ""),
+        "deadline": pl.get("deadline", ""),
+        "daysToDeadline": (day(pl["deadline"]) - on).days if pl.get("deadline") else None,
+        "timerMinutes": pl.get("timerMinutes", 35),
+        "phase": phase,
+        "phases": [{k: p[k] for k in ("id", "name", "start", "end", "exit")} for p in phases],
+        "week": week,
+        "thisWeek": this_week,
+        "strip": strip,
+        "studiedLast14": sum(1 for s in strip if s["studied"]),
+        "studiedToday": on.isoformat() in days,
+        "due": [d for d in due if d["due"]],
+        "upcoming": [d for d in due if not d["due"]],
+        "patterns": pattern_rows,
+        "totals": {
+            "attempts": len(attempts),
+            "problems": len(latest),
+            "solved": len(clean),
+            "listSolved": len(clean & problems.keys()),
+            "listTotal": len(problems),
+            "mocks": sum(1 for e in events if e["type"] == "mock"),
+            "mocksPassed": sum(1 for e in events if e["type"] == "mock" and e.get("result") == "pass"),
+            "contests": sum(1 for e in events if e["type"] == "contest"),
+        },
+        "recent": recent,
+        "timer": {**t, "minutes": timer_minutes(t)} if t else None,
+        "applications": apps,
+        "stages": pl.get("stages", []),
+    }
+
+
+# --- Commands -----------------------------------------------------------------
+
+
+def resolve(text, problems):
+    """A problem from a slug, a title, a LeetCode URL or a known slug's prefix."""
+    slug = slugify(text)
+    if slug in problems:
+        return slug
+    for s, p in problems.items():
+        if slugify(p["title"]) == slug:
+            return s
+    # Problems logged before (not on the list)
+    for a in reversed(read_lines(ATTEMPTS)):
+        if a["problem"] == slug:
+            return slug
+    return slug
+
+
+def cmd_log(args):
+    problems, patterns = catalogue()
+    slug = resolve(args.problem, problems)
+    known = problems.get(slug, {})
+    before = next((a for a in reversed(read_lines(ATTEMPTS)) if a["problem"] == slug), {})
+    result = RESULTS.get(args.result.lower())
+    if not result:
+        sys.exit("prep: result is solved, hint or fail (s, h, f)")
+    pattern = args.pattern or known.get("pattern") or before.get("pattern")
+    if pattern:
+        ids = {p["id"] for p in patterns}
+        if pattern not in ids:
+            match = [p["id"] for p in patterns if p["id"].startswith(slugify(pattern)) or slugify(p["name"]).startswith(slugify(pattern))]
+            pattern = match[0] if match else slugify(pattern)
+    diff = DIFFS.get((args.diff or "").lower()) or known.get("diff") or before.get("diff")
+
+    mins = args.mins
+    t = timer()
+    if mins is None and t and (not t.get("problem") or t["problem"] == slug):
+        mins = timer_minutes(t)
+    if t and (not t.get("problem") or t["problem"] == slug):
+        set_timer(None)
+
+    on = today()
+    retry_days = plan().get("retryDays", 3)
+    record = {
+        "at": now().isoformat(),
+        "date": on.isoformat(),
+        "problem": slug,
+        "title": args.title or known.get("title") or before.get("title") or titled(slug),
+        "pattern": pattern or "",
+        "diff": diff or "",
+        "result": result,
+        "mins": mins,
+        "retry": (on + dt.timedelta(days=retry_days)).isoformat() if result != "solved" else None,
+    }
+    if args.note:
+        record["note"] = args.note
+    append(ATTEMPTS, record)
+    if not args.quiet:
+        retry = f", re-solve on {record['retry']}" if record["retry"] else ""
+        took = f" in {mins} min" if mins is not None else ""
+        print(f"{record['title']}: {result}{took}{retry}")
+
+
+def cmd_undo(args):
+    path = EVENTS if args.event else ATTEMPTS
+    lines = path.read_text().splitlines() if path.exists() else []
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        sys.exit("prep: nothing to undo")
+    gone = json.loads(lines.pop())
+    path.write_text("".join(line + "\n" for line in lines))
+    touch()
+    print(f"Removed: {gone.get('title') or gone.get('type')} on {gone['date']}")
+
+
+def cmd_timer(args):
+    t = timer()
+    if args.action == "start":
+        problems, _ = catalogue()
+        slug = resolve(args.problem, problems) if args.problem else ""
+        set_timer({"started": now().isoformat(), "problem": slug, "title": problems.get(slug, {}).get("title", titled(slug)) if slug else ""})
+        print(f"Timer started{' for ' + slug if slug else ''}")
+    elif args.action in ("stop", "cancel"):
+        if not t:
+            sys.exit("prep: no timer running")
+        set_timer(None)
+        print(f"{timer_minutes(t)} min")
+    else:
+        if args.json:
+            print(json.dumps({**t, "minutes": timer_minutes(t)} if t else None))
+        elif t:
+            print(f"{t.get('problem') or 'timer'}: {timer_minutes(t)} min")
+        else:
+            print("No timer running")
+
+
+def cmd_event(kind):
+    def run(args):
+        record = {"at": now().isoformat(), "date": today().isoformat(), "type": kind, "mins": args.mins}
+        if kind == "study":
+            record["what"] = args.what or ""
+        elif kind == "mock":
+            record["kind"] = args.kind
+            record["result"] = {"p": "pass", "pass": "pass", "f": "fail", "fail": "fail"}.get(args.result, args.result)
+        elif kind == "contest":
+            record["solved"] = args.solved
+            record["of"] = args.of
+            if args.rank:
+                record["rank"] = args.rank
+        if getattr(args, "note", None):
+            record["note"] = args.note
+        append(EVENTS, record)
+        if not args.quiet:
+            print(f"Logged {kind}" + (f", {args.mins} min" if args.mins else ""))
+
+    return run
+
+
+def find_app(apps, name):
+    for a in apps:
+        if a["company"].lower() == name.lower():
+            return a
+    match = [a for a in apps if a["company"].lower().startswith(name.lower())]
+    if len(match) == 1:
+        return match[0]
+    sys.exit(f"prep: no application for {name}")
+
+
+def cmd_app(args):
+    apps = load_json(APPS, [])
+    stages = plan().get("stages", [])
+    stamp = today().isoformat()
+    if args.action == "add":
+        if any(a["company"].lower() == args.company.lower() for a in apps):
+            sys.exit(f"prep: {args.company} is already there")
+        stage = args.stage or "wishlist"
+        if stage not in stages:
+            sys.exit(f"prep: stage is one of {', '.join(stages)}")
+        apps.append({"company": args.company, "stage": stage, "history": [stage], "referral": args.referral or "", "next": "", "notes": [], "updated": stamp})
+    elif args.action == "stage":
+        a = find_app(apps, args.company)
+        if args.stage not in stages:
+            sys.exit(f"prep: stage is one of {', '.join(stages)}")
+        a["stage"] = args.stage
+        a.setdefault("history", []).append(args.stage)
+        a["updated"] = stamp
+    elif args.action == "next":
+        a = find_app(apps, args.company)
+        a["next"] = args.text
+        a["updated"] = stamp
+    elif args.action == "note":
+        a = find_app(apps, args.company)
+        a.setdefault("notes", []).append({"date": stamp, "text": args.text})
+        a["updated"] = stamp
+    elif args.action == "rm":
+        a = find_app(apps, args.company)
+        apps.remove(a)
+    if args.action != "list":
+        write_json(APPS, apps)
+    if args.json:
+        print(json.dumps(apps, ensure_ascii=False))
+    else:
+        for a in apps:
+            nxt = f" · next: {a['next']}" if a.get("next") else ""
+            print(f"{a['company']:<20} {a['stage']:<10}{nxt}")
+
+
+def stories_path():
+    if not STORIES.exists():
+        DATA.mkdir(parents=True, exist_ok=True)
+        shutil.copy(shared("stories.md"), STORIES)
+    return STORIES
+
+
+def cmd_stories(args):
+    path = stories_path()
+    if args.path:
+        print(path)
+        return
+    out, line_no = [], 0
+    for i, line in enumerate(path.read_text().splitlines(), 1):
+        if line.startswith("## "):
+            out.append({"title": line[3:].strip(), "line": i, "filled": True})
+        elif out and line.strip().startswith("- **") and line.strip().endswith(":**"):
+            out[-1]["filled"] = False
+    if args.json:
+        print(json.dumps({"path": str(path), "stories": out}, ensure_ascii=False))
+    else:
+        for s in out:
+            print(("  " if s["filled"] else "… ") + s["title"])
+
+
+def cmd_problems(args):
+    problems, patterns = catalogue()
+    attempts = read_lines(ATTEMPTS)
+    latest = latest_by_problem(attempts)
+    counts = {}
+    for a in attempts:
+        counts[a["problem"]] = counts.get(a["problem"], 0) + 1
+    out = []
+    for slug, p in problems.items():
+        a = latest.get(slug)
+        out.append({**p, "last": a["result"] if a else "", "lastDate": a["date"] if a else "", "attempts": counts.get(slug, 0)})
+    names = {p["id"]: p["name"] for p in patterns}
+    for slug, a in latest.items():
+        if slug not in problems:
+            out.append(
+                {
+                    "slug": slug,
+                    "title": a.get("title") or titled(slug),
+                    "diff": a.get("diff", ""),
+                    "pattern": a.get("pattern", ""),
+                    "patternName": names.get(a.get("pattern"), a.get("pattern", "")),
+                    "list": "",
+                    "last": a["result"],
+                    "lastDate": a["date"],
+                    "attempts": counts[slug],
+                }
+            )
+    if args.json:
+        print(json.dumps({"problems": out, "patterns": patterns}, ensure_ascii=False))
+    else:
+        for p in out:
+            if args.pattern and p["pattern"] != args.pattern:
+                continue
+            mark = {"solved": "✓", "hint": "~", "fail": "✗"}.get(p["last"], " ")
+            print(f"{mark} {p['slug']:<55} {p['diff']:<7} {p['patternName']}")
+
+
+def bar(progress, width=20):
+    n = round(max(0, min(1, progress)) * width)
+    return "█" * n + "░" * (width - n)
+
+
+def cmd_status(args):
+    # Something for frontends to watch from the start
+    if not STAMP.exists():
+        touch()
+    s = status()
+    if args.json:
+        print(json.dumps(s, ensure_ascii=False))
+        return
+    ph = s["phase"]
+    if ph:
+        print(f"{ph['name']} · phase {ph['index'] + 1} of {ph['count']} · {ph['daysLeft']} days left (ends {ph['end']})")
+        print(f"  Exit: {ph['exit']}")
+        print(f"  {bar(ph['metric']['progress'])} {ph['metric']['label']}")
+    if s["week"]:
+        w = s["week"]
+        pats = f" · {', '.join(w['patternNames'])}" if w["patternNames"] else ""
+        print(f"{w['label']}: {w['focus']}{pats}")
+    print("Last 14 days: " + "".join("●" if d["studied"] else "·" for d in s["strip"]) + f"  {s['studiedLast14']}/14")
+    tw = s["thisWeek"]
+    print(f"This week: {tw['problems']} problems ({tw['solved']} solved, {tw['hint']} hint, {tw['failed']} failed), {tw['minutes']} min")
+    if s["due"]:
+        print(f"Re-solve today ({len(s['due'])}):")
+        for d in s["due"]:
+            late = f", {d['overdueDays']} d late" if d["overdueDays"] else ""
+            print(f"  {d['title']} ({d['last']} on {d['lastDate']}{late})")
+    if s["timer"]:
+        print(f"Timer: {s['timer'].get('problem') or 'running'}, {s['timer']['minutes']} min")
+
+
+def cmd_paths(args):
+    print(f"data    {DATA}\nstate   {STATE}\nplan    {shared('plan.json')}\nproblems {shared('problems.json')}")
+
+
+def cmd_edit(args):
+    if args.what == "plan" and not (CONFIG / "plan.json").exists():
+        # Your own copy, over the installed one
+        CONFIG.mkdir(parents=True, exist_ok=True)
+        shutil.copy(shared("plan.json"), CONFIG / "plan.json")
+    path = {"attempts": ATTEMPTS, "events": EVENTS, "apps": APPS, "stories": STORIES, "plan": CONFIG / "plan.json"}[args.what]
+    if args.what == "stories":
+        stories_path()
+    subprocess.call([os.environ.get("EDITOR", "nvim"), str(path)])
+    touch()
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="prep", description="Interview preparation tracker")
+    sub = ap.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("status", help="progress against the plan")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("log", help="log an attempt: prep log two-sum s")
+    p.add_argument("problem", help="slug, title or LeetCode URL")
+    p.add_argument("result", help="solved, hint or fail (s, h, f)")
+    p.add_argument("-p", "--pattern")
+    p.add_argument("-d", "--diff", help="easy, medium or hard (e, m, h)")
+    p.add_argument("-m", "--mins", type=int, help="minutes taken (default: the running timer)")
+    p.add_argument("-t", "--title")
+    p.add_argument("-n", "--note")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(fn=cmd_log)
+
+    p = sub.add_parser("undo", help="remove the last attempt (or event)")
+    p.add_argument("--event", action="store_true")
+    p.set_defaults(fn=cmd_undo)
+
+    p = sub.add_parser("timer", help="time an attempt")
+    p.add_argument("action", choices=["start", "stop", "cancel", "status"], nargs="?", default="status")
+    p.add_argument("problem", nargs="?")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_timer)
+
+    p = sub.add_parser("study", help="log study time that isn't a problem")
+    p.add_argument("mins", type=int)
+    p.add_argument("what", nargs="?", help="e.g. 'Java concurrency'")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(fn=cmd_event("study"))
+
+    p = sub.add_parser("mock", help="log a mock interview")
+    p.add_argument("result", choices=["pass", "fail", "p", "f"])
+    p.add_argument("-k", "--kind", default="dsa", choices=["dsa", "design", "lld", "behavioural"])
+    p.add_argument("-m", "--mins", type=int)
+    p.add_argument("-n", "--note")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(fn=cmd_event("mock"))
+
+    p = sub.add_parser("contest", help="log a contest")
+    p.add_argument("solved", type=int)
+    p.add_argument("--of", type=int, default=4)
+    p.add_argument("-r", "--rank", type=int)
+    p.add_argument("-m", "--mins", type=int, default=90)
+    p.add_argument("-n", "--note")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(fn=cmd_event("contest"))
+
+    p = sub.add_parser("app", help="the application pipeline")
+    p.add_argument("action", choices=["list", "add", "stage", "next", "note", "rm"], nargs="?", default="list")
+    p.add_argument("company", nargs="?")
+    p.add_argument("text", nargs="?", help="stage, next step or note")
+    p.add_argument("-r", "--referral")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_app)
+
+    p = sub.add_parser("stories", help="behavioural stories")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--path", action="store_true")
+    p.set_defaults(fn=cmd_stories)
+
+    p = sub.add_parser("problems", help="the problem list and how each went")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("-p", "--pattern")
+    p.set_defaults(fn=cmd_problems)
+
+    p = sub.add_parser("edit", help="open a data file in $EDITOR")
+    p.add_argument("what", choices=["attempts", "events", "apps", "stories", "plan"])
+    p.set_defaults(fn=cmd_edit)
+
+    p = sub.add_parser("paths", help="where things are")
+    p.set_defaults(fn=cmd_paths)
+
+    args = ap.parse_args()
+    if not args.cmd:
+        args = ap.parse_args(["status"])
+    if args.cmd == "app":
+        if args.action != "list" and not args.company:
+            sys.exit("prep: which company?")
+        if args.action == "add":
+            args.stage = args.text
+        elif args.action == "stage":
+            args.stage = args.text
+        if args.action in ("stage", "next", "note") and not args.text:
+            sys.exit("prep: what text?")
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
